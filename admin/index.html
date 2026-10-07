@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/admin/admin.css">
+  <link rel="stylesheet" href="./admin.css">
 </head>
 <body>
 
@@ -55,7 +55,7 @@
         </button>
       </nav>
       <div class="sidebar-footer">
-        <a href="/" target="_blank" class="btn btn-outline btn-sm btn-block">🌐 Xem Web Quay Thưởng</a>
+        <a href="/" data-user-app-link target="_blank" class="btn btn-outline btn-sm btn-block">🌐 Xem Web Quay Thưởng</a>
         <button onclick="handleLogout()" class="btn btn-danger-outline btn-sm btn-block mt-2">🚪 Đăng Xuất</button>
       </div>
     </aside>
@@ -72,6 +72,33 @@
           <div class="stat-pill sync-pill"><span class="label">Chưa đồng bộ Sheet:</span> <strong id="stat-unsynced" class="badge-unsynced">0</strong></div>
         </div>
       </header>
+
+      <section class="reward-overview" aria-label="Thống kê người tham gia và các mốc thưởng" aria-busy="true">
+        <div class="reward-metrics">
+          <div class="reward-metric reward-metric-participants">
+            <span class="reward-metric-label">Người tham gia</span>
+            <div class="reward-participant-count"><strong id="stat-participants">—</strong><span>SĐT</span></div>
+            <p>Có ít nhất một lượt quay hiệu lực</p>
+          </div>
+          <div class="reward-metric">
+            <div class="reward-milestone-heading"><h4>Mốc 14</h4><span>Vàng 0,1 chỉ</span></div>
+            <dl class="reward-milestone-counts">
+              <div><dt>Đã đến mốc <span>(a)</span></dt><dd id="stat-milestone-14-eligible">—</dd></div>
+              <div><dt>Đã trúng vàng <span>(b)</span></dt><dd id="stat-milestone-14-gold">—</dd></div>
+            </dl>
+            <p>Tính trên SĐT đã hoàn thành lượt 14</p>
+          </div>
+          <div class="reward-metric">
+            <div class="reward-milestone-heading"><h4>Mốc 25</h4><span>Vàng 0,5 chỉ</span></div>
+            <dl class="reward-milestone-counts">
+              <div><dt>Đủ điều kiện <span>(a)</span></dt><dd id="stat-milestone-25-eligible">—</dd></div>
+              <div><dt>Đã trúng vàng <span>(b)</span></dt><dd id="stat-milestone-25-gold">—</dd></div>
+            </dl>
+            <p>Đã hoàn thành lượt 25 và nhận 50k ở lượt 14</p>
+          </div>
+        </div>
+        <p id="reward-summary-status" class="reward-summary-status" role="status">Đang tải thống kê…</p>
+      </section>
 
       <!-- TAB 1: ĐẠI LÝ -->
       <section id="tab-agencies" class="tab-content active">
@@ -114,9 +141,6 @@
       <!-- TAB 2: QUÀ TẶNG -->
       <section id="tab-prizes" class="tab-content">
         <div class="toolbar">
-          <div>
-            <p class="section-desc">Tỷ lệ trúng thưởng tự động tính 100% dựa trên <strong>số lượng tồn kho thực tế</strong> của từng quà.</p>
-          </div>
           <div class="action-buttons">
             <button class="btn btn-success" onclick="openPrizeModal()"><span class="btn-icon">➕</span> Thêm Quà Mới</button>
           </div>
@@ -134,12 +158,11 @@
                 <th style="width: 100px; text-align: center;">Tổng Nhập</th>
                 <th style="width: 100px; text-align: center;">Tồn Kho</th>
                 <th style="width: 100px; text-align: center;">Đã Trúng</th>
-                <th style="width: 150px;">Tỷ Lệ Trúng (% Kho)</th>
                 <th style="width: 140px; text-align: center;">Thao Tác</th>
               </tr>
             </thead>
             <tbody id="prizes-table-body">
-              <tr><td colspan="10" class="text-center">Đang tải danh sách quà tặng...</td></tr>
+              <tr><td colspan="9" class="text-center">Đang tải danh sách quà tặng...</td></tr>
             </tbody>
           </table>
         </div>
@@ -204,11 +227,16 @@
 
         <div class="toolbar">
           <div class="search-box">
-            <input type="text" id="spin-search-input" placeholder="Tìm theo SĐT, Mã dự thưởng, Đại lý, Tên chủ...">
+            <input type="text" id="spin-search-input" placeholder="Tìm SĐT, mã dự thưởng, đại lý hoặc thông tin ngân hàng...">
             <select id="spin-sync-filter">
               <option value="all">Tất cả trạng thái đồng bộ</option>
               <option value="1">Đã đồng bộ Google Sheet</option>
               <option value="0">Chưa đồng bộ Google Sheet</option>
+            </select>
+            <select id="spin-status-filter" onchange="loadSpins()">
+              <option value="all">Tất cả lượt, gồm đã hủy</option>
+              <option value="active">Có hiệu lực</option>
+              <option value="void">Đã hủy</option>
             </select>
           </div>
         </div>
@@ -217,11 +245,11 @@
           <table class="data-table">
             <thead>
               <tr>
-                <th style="width: 130px;">Thời Gian</th>
+                <th style="width: 160px;">Thời Gian / Lượt</th>
                 <th style="width: 110px;">Mã ĐL</th>
                 <th>Tên Đại Lý</th>
                 <th style="width: 120px;">Tỉnh/Thành</th>
-                <th>Chủ ĐL / SĐT</th>
+                <th>SĐT / Ngân hàng</th>
                 <th>Địa Chỉ</th>
                 <th style="width: 130px;">Mã Cào & Serial</th>
                 <th style="width: 180px;">Quà Trúng</th>
@@ -264,36 +292,92 @@
           <div class="code-box">
             <button class="btn-copy" onclick="copyScriptCode()">Sao chép mã Apps Script</button>
             <pre id="apps-script-code">
-function doPost(e) {
+function doPost(request) {
+  var lock = LockService.getScriptLock();
+  var acquired = false;
   try {
+    var payload = JSON.parse(request.postData.contents);
+    if (payload.action !== 'sync_spins' || payload.protocol !== 'spin-record-v3' || !Array.isArray(payload.data)) {
+      throw new Error('Unsupported sync protocol');
+    }
+    var seen = {};
+    payload.data.forEach(function(record) {
+      if (!Number.isSafeInteger(record.id) || record.id < 1 || seen[record.id]
+        || !Number.isSafeInteger(record.record_version) || record.record_version < 1
+        || ['active', 'void'].indexOf(record.status) === -1) {
+        throw new Error('Invalid record identity, version or status');
+      }
+      seen[record.id] = true;
+    });
+    acquired = lock.tryLock(10000);
+    if (!acquired) throw new Error('Sync busy; retry later');
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    var payload = JSON.parse(e.postData.contents);
-    var spins = payload.data || [];
-    
-    // Nếu trang tính còn trống, tạo dòng tiêu đề (Header)
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow([
-        "ID", "Thời Gian", "Mã Đại Lý", "Tên Đại Lý", "Tỉnh Thành", 
-        "Chủ Đại Lý", "Số Điện Thoại", "Địa Chỉ", "Mã Dự Thưởng", 
-        "Số Serial", "Phần Quà Trúng", "Thời Gian Đồng Bộ"
-      ]);
+    var headers = [
+      'ID', 'Thời Gian', 'Mã Đại Lý', 'Tên Ngân Hàng', 'Số Tài Khoản Ngân Hàng', 'Tên Chủ Tài Khoản Ngân Hàng',
+      'Số Điện Thoại', 'Địa Chỉ', 'Mã Dự Thưởng', 'Mã Quà Trúng', 'Vị Trí Trong Vòng'
+    ];
+    var existing = sheet.getLastRow() ? sheet.getDataRange().getValues() : [];
+    if (existing.length) {
+      existing[0].forEach(function(header, index) {
+        var legacyHeader = index < headers.length && ['ID', 'Thời Gian', 'Mã Đại Lý', 'Tên Đại Lý', 'Tỉnh Thành', 'Tên Ngân Hàng', 'Số Tài Khoản Ngân Hàng', 'Tên Chủ Tài Khoản Ngân Hàng', 'Số Điện Thoại', 'Địa Chỉ', 'Mã Dự Thưởng', 'Kỳ Thưởng', 'Lượt Trong Kỳ', 'Chủ Đại Lý'].indexOf(header) !== -1;
+        if (header !== '' && index < headers.length && header !== headers[index] && !legacyHeader) {
+          throw new Error('Custom sheet headers require manual migration');
+        }
+      });
+      if (existing[0].length > headers.length) {
+        sheet.getRange(1, headers.length + 1, 1, existing[0].length - headers.length).clearContent();
+      }
     }
-    
-    // Thêm các dòng dữ liệu quay thưởng mới
-    for (var i = 0; i < spins.length; i++) {
-      var s = spins[i];
-      sheet.appendRow([
-        s.id, s.spin_time, s.agency_code, s.agency_name, s.province,
-        s.owner_name, s.phone, s.address, s.entry_code,
-        s.serial_number, s.prize_name, new Date()
-      ]);
+    var rowsById = {};
+    for (var rowIndex = 1; rowIndex < existing.length; rowIndex++) {
+      var existingId = existing[rowIndex][0];
+      if (existingId === '' || existingId === null || existingId === undefined) continue;
+      if (rowsById[existingId]) throw new Error('Duplicate sheet IDs require reconciliation');
+      var isVoid = typeof existing[rowIndex][9] === 'string' && existing[rowIndex][9].indexOf('[ĐÃ HỦY]') === 0;
+      rowsById[existingId] = { row: rowIndex + 1, isVoid: isVoid, version: isVoid ? 2 : 1 };
     }
-    
-    return ContentService.createTextOutput(JSON.stringify({ status: "success", count: spins.length }))
-      .setMimeType(ContentService.MimeType.JSON);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    var acknowledgements = [];
+    payload.data.forEach(function(record) {
+      var saved = rowsById[record.id];
+      var shouldUpdate = !saved || (saved.isVoid && record.status === 'active' ? false : record.record_version >= saved.version);
+      if (shouldUpdate) {
+        var prizeText = record.prize_code || '';
+        if (record.status === 'void') {
+          prizeText = '[ĐÃ HỦY] ' + prizeText;
+        }
+        var values = [
+          record.id, record.spin_time, record.agency_code,
+          record.bank_name || '', record.bank_account_number || '', record.bank_account_holder_name || '',
+          record.phone, record.address,
+          record.entry_code, prizeText, record.position_in_cycle || ''
+        ].map(function(value) {
+          if (value === null || value === undefined) return '';
+          return typeof value === 'string' && /^[=+@-]/.test(value) ? "'" + value : value;
+        });
+        var destination = saved ? saved.row : sheet.getLastRow() + 1;
+        sheet.getRange(destination, 5, 1, 1).setNumberFormat('@');
+        sheet.getRange(destination, 7, 1, 1).setNumberFormat('@');
+        sheet.getRange(destination, 9, 1, 1).setNumberFormat('@');
+        sheet.getRange(destination, 1, 1, headers.length).setValues([values]);
+        if (saved && existing.length > 0 && existing[0].length > headers.length) {
+          sheet.getRange(destination, headers.length + 1, 1, existing[0].length - headers.length).clearContent();
+        }
+        saved = { row: destination, version: record.record_version, isVoid: record.status === 'void' };
+        rowsById[record.id] = saved;
+      }
+      acknowledgements.push({ id: record.id, record_version: saved.version });
+    });
+    SpreadsheetApp.flush();
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'success', protocol: 'spin-record-v3', acknowledgements: acknowledgements
+    })).setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: error.toString() }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'error', protocol: 'spin-record-v3', message: String(error)
+    })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    if (acquired) lock.releaseLock();
   }
 }
             </pre>
@@ -415,6 +499,6 @@ function doPost(e) {
 
   <!-- SheetJS Library for reading & writing Excel in browser -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="/admin/admin.js"></script>
+  <script src="./admin.js"></script>
 </body>
 </html>

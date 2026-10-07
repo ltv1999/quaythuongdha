@@ -2,10 +2,19 @@
 const path = require('path');
 const fs = require('fs');
 
-const dbPath = path.join(__dirname, 'data.db');
+const { migrateLottery, isLotteryReady } = require('./lotterySchema');
+const { migrateCampaign, isCampaignReady } = require('./campaignSchema');
+const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'data.db');
 const db = new Database(dbPath);
 
+const existingSchema = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spin_logs'").get();
+if (existingSchema && (!isLotteryReady(db) || !isCampaignReady(db))) {
+  db.close();
+  throw new Error('DATABASE_MIGRATION_REQUIRED: Dừng server/worker và chạy npm run db:migrate trước khi khởi động.');
+}
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 5000');
 
 function initDatabase() {
   db.exec(`
@@ -44,7 +53,10 @@ function initDatabase() {
       agency_code TEXT,
       agency_name TEXT,
       province TEXT,
-      owner_name TEXT,
+      bank_code TEXT,
+      bank_name TEXT,
+      bank_account_number TEXT,
+      bank_account_holder_name TEXT,
       phone TEXT,
       address TEXT,
       entry_code TEXT,
@@ -116,7 +128,7 @@ function initDatabase() {
 
     const initialPrizes = [
       {
-        code: 'GIAI_NHAT',
+        code: 'NHAT',
         prize_tier: 'GIẢI NHẤT',
         name: '0,5 chỉ vàng 999',
         image_url: '/img/Giải Nhất.png',
@@ -125,30 +137,48 @@ function initDatabase() {
         used_quantity: 0
       },
       {
-        code: 'GIAI_NHI',
+        code: 'NHI',
         prize_tier: 'GIẢI NHÌ',
-        name: 'Nồi Chiên Không Dầu Điện Tử 6L',
+        name: '0,1 chỉ vàng Tiểu Kim Cát',
         image_url: '/img/Artboard 23@2x.png',
         total_quantity: 15,
         remaining_quantity: 15,
         used_quantity: 0
       },
       {
-        code: 'GIAI_BA',
+        code: 'BA',
         prize_tier: 'GIẢI BA',
-        name: 'Bình Giữ Nhiệt Inox BioAmicus 500ml',
+        name: '01 lì xì trị giá 500.000 đồng',
         image_url: '/img/Artboard 23@2x.png',
         total_quantity: 50,
         remaining_quantity: 50,
         used_quantity: 0
       },
       {
-        code: 'GIAI_KHUYEN_KHICH',
+        code: 'CAOLON',
         prize_tier: 'GIẢI KHUYẾN KHÍCH',
-        name: 'Gấu Bông Thần Tài BioAmicus',
+        name: '01 lọ BioAmicus D3K2',
         image_url: '/img/Artboard 23@2x.png',
         total_quantity: 100,
         remaining_quantity: 100,
+        used_quantity: 0
+      },
+      {
+        code: 'MAYMAN1',
+        prize_tier: 'GIẢI MAY MẮN 1',
+        name: '01 lì xì trị giá 100.000 đồng',
+        image_url: '/img/Artboard 23@2x.png',
+        total_quantity: 650,
+        remaining_quantity: 650,
+        used_quantity: 0
+      },
+      {
+        code: 'MAYMAN2',
+        prize_tier: 'GIẢI MAY MẮN 2',
+        name: '01 lì xì trị giá 50.000 đồng',
+        image_url: '/img/Artboard 23@2x.png',
+        total_quantity: 900,
+        remaining_quantity: 900,
         used_quantity: 0
       }
     ];
@@ -182,5 +212,9 @@ function initDatabase() {
   }
 }
 
-initDatabase();
+if (!existingSchema) {
+  initDatabase();
+  migrateLottery(db);
+  migrateCampaign(db);
+}
 module.exports = db;

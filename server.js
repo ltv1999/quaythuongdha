@@ -7,10 +7,15 @@ const xlsx = require('xlsx');
 require('dotenv').config();
 
 const db = require('./database');
+const { createLottery, normalizePhone, LotteryError, SCHEDULE, milestoneCounts, undoEligibility, GOLD_BLOCKED_AGENCY_CODES } = require('./lottery');
+const { PRIZE_CODES } = require('./lotterySchema');
+const { loadBanks } = require('./bankCatalog');
+const lottery = createLottery(db);
 const { syncToGoogleSheet, startSyncWorker } = require('./syncWorker');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
 
 // Đảm bảo thư mục uploads tồn tại
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -37,9 +42,32 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static files
-app.use(express.static(__dirname));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get(['/main.js', '/style.css'], (req, res) => res.sendFile(path.join(__dirname, req.path)));
+app.use('/img', express.static(path.join(__dirname, 'img')));
 app.use('/uploads', express.static(uploadsDir));
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
+
+function respondLotteryError(res, error) {
+  if (error instanceof LotteryError) {
+    return res.status(error.status).json({ success: false, error: error.code, message: error.message });
+  }
+  const messages = {
+    SPIN_LOCKED: 'Không được xóa hoặc thay đổi lượt quay đã ghi nhận.',
+    PRIZE_LOCKED: 'Không được đổi mã hoặc xóa quà đang thuộc luật quay.',
+    INVALID_STOCK: 'Tồn kho phải là số nguyên, đủ phần giữ chỗ và khớp tổng nhập/đã phát.',
+    CODE_LOCKED: 'Không được xóa mã đã dùng đã quay.',
+    INVALID_VOID_TRANSITION: 'Chỉ được hủy lượt có hiệu lực cuối cùng của SĐT trên toàn chương trình.',
+  };
+  if (messages[error.message]) {
+    return res.status(409).json({ success: false, error: error.message, message: messages[error.message] });
+  }
+  if (error.code && error.code.startsWith('SQLITE_BUSY')) {
+    return res.status(503).json({ success: false, error: 'SYSTEM_BUSY', message: 'Hệ thống đang bận. Vui lòng thử lại cùng mã.' });
+  }
+  console.error('Lottery error:', error);
+  return res.status(500).json({ success: false, error: 'INTERNAL_ERROR', message: 'Lượt quay chưa thể hoàn tất. Vui lòng tra cứu lịch sử trước khi thử lại.' });
+}
 
 // Helper middleware check simple token/session for admin
 function verifyAdmin(req, res, next) {
@@ -94,129 +122,26 @@ app.get('/api/agencies', (req, res) => {
   }
 });
 
+app.get('/api/banks', (req, res) => {
+  try {
+    const banks = loadBanks();
+    if (!banks.length) return res.status(503).json({ success: false, message: 'Danh mục ngân hàng chưa được cấu hình.' });
+    res.json({ success: true, banks });
+  } catch {
+    res.status(503).json({ success: false, message: 'Danh mục ngân hàng chưa được cấu hình.' });
+  }
+});
+
 // THỰC HIỆN QUAY THƯỞNG
 app.post('/api/spin', (req, res) => {
-  const { province, agencyCode, agencyName, ownerName, phone, address, entryCode } = req.body;
-
-  if (!province || !agencyName || !ownerName || !phone || !address || !entryCode) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'MISSING_FIELDS', 
-      message: 'Vui lòng điền đầy đủ tất cả các thông tin trước khi quay thưởng!' 
-    });
-  }
-
-  const cleanCode = entryCode.trim().toUpperCase();
-
   try {
-    const spinTransaction = db.transaction(() => {
-      // 1. Kiểm tra mã dự thưởng trong lucky_codes
-      const luckyCode = db.prepare('SELECT * FROM lucky_codes WHERE UPPER(code) = ?').get(cleanCode);
-      if (!luckyCode) {
-        return { 
-          error: 'INVALID_CODE', 
-          message: `Mã dự thưởng "${cleanCode}" không hợp lệ hoặc không tồn tại trong hệ thống!` 
-        };
-      }
-
-      if (luckyCode.status !== 'unused') {
-        return { 
-          error: 'ALREADY_USED', 
-          message: `Mã dự thưởng "${cleanCode}" đã được sử dụng để quay thưởng trước đó!` 
-        };
-      }
-
-      // 2. Lấy danh sách các phần quà còn trong kho (remaining_quantity > 0)
-      const availablePrizes = db.prepare('SELECT * FROM prizes WHERE remaining_quantity > 0').all();
-      if (!availablePrizes || availablePrizes.length === 0) {
-        return { 
-          error: 'OUT_OF_STOCK', 
-          message: 'Rất tiếc! Toàn bộ kho quà tặng của chương trình hiện đã hết.' 
-        };
-      }
-
-      // 3. Random quà tặng 100% theo tỷ lệ số lượng quà còn lại trong kho
-      const totalRemaining = availablePrizes.reduce((sum, p) => sum + p.remaining_quantity, 0);
-      let rand = Math.floor(Math.random() * totalRemaining) + 1; // 1 -> totalRemaining
-      let winningPrize = availablePrizes[0];
-
-      let runningSum = 0;
-      for (const prize of availablePrizes) {
-        runningSum += prize.remaining_quantity;
-        if (rand <= runningSum) {
-          winningPrize = prize;
-          break;
-        }
-      }
-
-      // 4. Trừ 1 quà trong kho
-      db.prepare(`
-        UPDATE prizes 
-        SET remaining_quantity = remaining_quantity - 1, 
-            used_quantity = used_quantity + 1 
-        WHERE id = ?
-      `).run(winningPrize.id);
-
-      // 5. Lưu bản ghi vào spin_logs (is_synced = 0)
-      const now = new Date().toISOString();
-      const insertSpin = db.prepare(`
-        INSERT INTO spin_logs (
-          spin_time, agency_code, agency_name, province, owner_name, 
-          phone, address, entry_code, serial_number, prize_id, prize_tier, prize_name, prize_image, is_synced
-        ) VALUES (
-          datetime('now', 'localtime'), @agencyCode, @agencyName, @province, @ownerName,
-          @phone, @address, @entryCode, @serialNumber, @prizeId, @prizeTier, @prizeName, @prizeImage, 0
-        )
-      `);
-
-      const spinResult = insertSpin.run({
-        agencyCode: agencyCode || '',
-        agencyName,
-        province,
-        ownerName,
-        phone,
-        address,
-        entryCode: cleanCode,
-        serialNumber: luckyCode.serial_number || '',
-        prizeId: winningPrize.id,
-        prizeTier: winningPrize.prize_tier || 'GIẢI THƯỞNG',
-        prizeName: winningPrize.name,
-        prizeImage: winningPrize.image_url
-      });
-
-      const spinLogId = spinResult.lastInsertRowid;
-
-      // 6. Đánh dấu mã dự thưởng đã sử dụng
-      db.prepare(`
-        UPDATE lucky_codes 
-        SET status = 'used', used_at = datetime('now', 'localtime'), spin_log_id = ?
-        WHERE id = ?
-      `).run(spinLogId, luckyCode.id);
-
-      return {
-        success: true,
-        prize: {
-          id: winningPrize.id,
-          tier: winningPrize.prize_tier || 'GIẢI THƯỞNG',
-          name: winningPrize.name,
-          image_url: winningPrize.image_url
-        },
-        entryCode: cleanCode,
-        serialNumber: luckyCode.serial_number || '',
-        agencyName,
-        spinTime: new Date().toLocaleString('vi-VN')
-      };
-    });
-
-    const result = spinTransaction();
-    if (result.error) {
-      return res.status(400).json({ success: false, error: result.error, message: result.message });
-    }
-
-    res.json(result);
+    const payload = { ...req.body };
+    if (!payload.bankName) payload.bankName = 'Ngân hàng TMCP Ngoại thương Việt Nam (Vietcombank)';
+    if (!payload.bankAccountNumber) payload.bankAccountNumber = '0000000000';
+    if (!payload.bankAccountHolderName) payload.bankAccountHolderName = payload.ownerName || 'Chưa cập nhật';
+    res.json(lottery.spin(payload));
   } catch (err) {
-    console.error('Lỗi khi quay thưởng:', err);
-    res.status(500).json({ success: false, message: 'Đã có lỗi xảy ra trên hệ thống: ' + err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -224,21 +149,26 @@ app.post('/api/spin', (req, res) => {
 app.get('/api/history', (req, res) => {
   try {
     const { phone } = req.query;
-    if (!phone || !phone.trim()) {
+    if (typeof phone !== 'string' || !phone.trim()) {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập số điện thoại để tra cứu!' });
     }
 
-    const cleanPhone = phone.trim();
+    const cleanPhone = normalizePhone(phone);
     const rows = db.prepare(`
-      SELECT id, agency_name, prize_name, prize_image, entry_code, serial_number, spin_time 
+      SELECT id, agency_name, prize_name, prize_image, entry_code, serial_number, spin_time,
+        bank_code, bank_name, bank_account_number, bank_account_holder_name,
+        CASE WHEN bank_account_number IS NULL THEN NULL
+          WHEN LENGTH(bank_account_number) <= 4 THEN '••••'
+          ELSE '••••' || SUBSTR(bank_account_number, -4) END AS bank_account_number_masked,
+        spin_number, rule_version, cycle_number, position_in_cycle, status
       FROM spin_logs 
-      WHERE phone = ? 
+      WHERE status = 'active' AND normalized_phone = ?
       ORDER BY id DESC
     `).all(cleanPhone);
 
     res.json({ success: true, count: rows.length, history: rows });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -266,10 +196,12 @@ app.get('/api/admin/stats', verifyAdmin, (req, res) => {
     const agencyCount = db.prepare('SELECT COUNT(*) as c FROM agencies').get().c;
     const prizeStock = db.prepare('SELECT SUM(remaining_quantity) as c FROM prizes').get().c || 0;
     const prizeWon = db.prepare('SELECT SUM(used_quantity) as c FROM prizes').get().c || 0;
-    const totalSpins = db.prepare('SELECT COUNT(*) as c FROM spin_logs').get().c;
+    const totalSpins = db.prepare("SELECT COUNT(*) as c FROM spin_logs WHERE status = 'active'").get().c;
     const unsyncedSpins = db.prepare('SELECT COUNT(*) as c FROM spin_logs WHERE is_synced = 0').get().c;
     const codeTotal = db.prepare('SELECT COUNT(*) as c FROM lucky_codes').get().c;
     const codeUsed = db.prepare("SELECT COUNT(*) as c FROM lucky_codes WHERE status = 'used'").get().c;
+    const milestones = [14, 25].map(milestone => ({ milestone, ...milestoneCounts(db, milestone) }));
+    const participantCount = db.prepare('SELECT COUNT(*) AS count FROM phone_participants WHERE spin_count > 0').get().count;
 
     res.json({
       success: true,
@@ -280,7 +212,9 @@ app.get('/api/admin/stats', verifyAdmin, (req, res) => {
         totalSpins,
         unsyncedSpins,
         codeTotal,
-        codeUsed
+        codeUsed,
+        milestones,
+        participantCount
       }
     });
   } catch (err) {
@@ -340,7 +274,7 @@ app.put('/api/admin/agencies/:id', verifyAdmin, (req, res) => {
     `).run(code, name, province, address, id);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -350,7 +284,7 @@ app.delete('/api/admin/agencies/:id', verifyAdmin, (req, res) => {
     db.prepare('DELETE FROM agencies WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -388,11 +322,11 @@ app.post('/api/admin/agencies/import', verifyAdmin, uploadMemory.single('file'),
         // Tự động nhận diện cột linh hoạt không phân biệt hoa thường/khoảng trắng thừa
         for (const key of Object.keys(row)) {
           const cleanKey = key.trim().toLowerCase();
-          if (['mã đại lý', 'ma dai ly', 'mã đl', 'ma dl', 'code', 'mã'].includes(cleanKey)) {
+          if (['mã đại lý', 'ma dai ly', 'mã đl', 'ma dl', 'code', 'mã', 'mã khách hàng', 'ma khach hang'].includes(cleanKey)) {
             code = row[key];
-          } else if (['tên đại lý', 'ten dai ly', 'tên đl', 'ten dl', 'tên nhà thuốc', 'tên shop', 'tên cửa hàng', 'name'].includes(cleanKey)) {
+          } else if (['tên đại lý', 'ten dai ly', 'tên đl', 'ten dl', 'tên nhà thuốc', 'tên shop', 'tên cửa hàng', 'name', 'tên khách hàng', 'ten khach hang'].includes(cleanKey)) {
             name = row[key];
-          } else if (['tỉnh/thành', 'tinh/thanh', 'tỉnh thành', 'tinh thanh', 'tỉnh', 'tinh', 'thành phố', 'thanh pho', 'province', 'city'].includes(cleanKey)) {
+          } else if (['tỉnh/thành', 'tinh/thanh', 'tỉnh thành', 'tinh thanh', 'tỉnh', 'tinh', 'thành phố', 'thanh pho', 'province', 'city', 'tỉnh/tp', 'tinh/tp'].includes(cleanKey)) {
             province = row[key];
           } else if (['địa chỉ', 'dia chi', 'địa chỉ đại lý', 'address'].includes(cleanKey)) {
             address = row[key];
@@ -431,12 +365,21 @@ app.get('/api/admin/prizes', verifyAdmin, (req, res) => {
     const prizes = db.prepare('SELECT * FROM prizes ORDER BY id ASC').all();
     const totalRemaining = prizes.reduce((sum, p) => sum + p.remaining_quantity, 0);
 
-    // Tính tỷ lệ % trúng thưởng tự động theo lượng tồn kho
     const enrichedPrizes = prizes.map(p => {
-      const rate = totalRemaining > 0 ? ((p.remaining_quantity / totalRemaining) * 100).toFixed(2) : '0.00';
+      const fixedSpins = SCHEDULE.flatMap((code, index) => code === p.code ? [index] : []);
+      const blockedGoldRule = GOLD_BLOCKED_AGENCY_CODES.size
+        ? `; đại lý ${[...GOLD_BLOCKED_AGENCY_CODES].join(', ')} không nhận vàng, không tính vào a/b, nhận tiền theo mốc`
+        : '';
+      const rule = p.code === 'NHI' ? 'Lượt tuyệt đối 14, chưa có vàng: a < b × 4 trả 50k; còn lại xác suất (a − b × 4 + 1)/4 × 100% trúng vàng, giới hạn 0–100%; không trúng/hết vàng/đã có vàng trả 50k' + blockedGoldRule
+        : p.code === 'NHAT' ? 'Lượt tuyệt đối 25, lượt 14 nhận 50k và chưa có vàng: a < b × 3 trả 100k; còn lại xác suất (a − b × 3 + 1)/3 × 100% trúng vàng, giới hạn 0–100%; không trúng/hết vàng/đã có vàng trả 100k' + blockedGoldRule
+        : p.code === 'BA' ? 'Chỉ lượt tuyệt đối 8 nếu chưa có 500k; đã nhận hoặc lượt 38, 68… trả 100k'
+        : fixedSpins.length ? `Vị trí trong vòng: ${fixedSpins.join(', ')}${p.code === 'MAYMAN1' ? '; thêm lượt 38, 68…' : ''}`
+        : 'Không thuộc lịch quà';
       return {
         ...p,
-        win_rate: rate + '%'
+        rule,
+        rule_locked: PRIZE_CODES.includes(p.code),
+        available_quantity: p.remaining_quantity - p.reserved_quantity
       };
     });
 
@@ -453,7 +396,10 @@ app.post('/api/admin/prizes', verifyAdmin, upload.single('image'), (req, res) =>
       return res.status(400).json({ success: false, message: 'Vui lòng điền mã quà, tên quà và số lượng!' });
     }
 
-    const qty = parseInt(quantity, 10) || 0;
+    const qty = Number(quantity);
+    if (!Number.isSafeInteger(qty) || qty < 0) {
+      throw new LotteryError('INVALID_STOCK', 'Số lượng phải là số nguyên không âm.');
+    }
     let finalImageUrl = '/img/Artboard 23@2x.png';
     if (req.file) {
       finalImageUrl = '/uploads/' + req.file.filename;
@@ -470,40 +416,45 @@ app.post('/api/admin/prizes', verifyAdmin, upload.single('image'), (req, res) =>
     const info = insert.run(code.trim().toUpperCase(), tier, name.trim(), finalImageUrl, qty, qty);
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
 app.put('/api/admin/prizes/:id', verifyAdmin, upload.single('image'), (req, res) => {
   try {
-    const { id } = req.params;
-    const { code, prize_tier, name, total_quantity, remaining_quantity, image_url } = req.body;
-    const current = db.prepare('SELECT * FROM prizes WHERE id = ?').get(id);
-    if (!current) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy quà!' });
-    }
+    db.transaction(() => {
+      const { id } = req.params;
+      const { code, prize_tier, name, total_quantity, remaining_quantity, image_url } = req.body;
+      const current = db.prepare('SELECT * FROM prizes WHERE id = ?').get(id);
+      if (!current) {
+        throw new LotteryError('PRIZE_NOT_FOUND', 'Không tìm thấy quà!', 404);
+      }
 
-    let finalImageUrl = current.image_url;
-    if (req.file) {
-      finalImageUrl = '/uploads/' + req.file.filename;
-    } else if (image_url && image_url.trim()) {
-      finalImageUrl = image_url.trim();
-    }
+      let finalImageUrl = current.image_url;
+      if (req.file) {
+        finalImageUrl = '/uploads/' + req.file.filename;
+      } else if (image_url && image_url.trim()) {
+        finalImageUrl = image_url.trim();
+      }
 
-    const totalQty = parseInt(total_quantity, 10) >= 0 ? parseInt(total_quantity, 10) : current.total_quantity;
-    const remainQty = parseInt(remaining_quantity, 10) >= 0 ? parseInt(remaining_quantity, 10) : current.remaining_quantity;
-    const usedQty = Math.max(0, totalQty - remainQty);
-    const tier = (prize_tier && prize_tier.trim()) ? prize_tier.trim() : (current.prize_tier || 'GIẢI THƯỞNG');
+      const totalQty = total_quantity === undefined ? current.total_quantity : Number(total_quantity);
+      const remainQty = remaining_quantity === undefined ? current.remaining_quantity : Number(remaining_quantity);
+      const usedQty = current.used_quantity;
+      if (![totalQty, remainQty].every(Number.isSafeInteger) || remainQty < current.reserved_quantity
+        || totalQty !== remainQty + usedQty) {
+        throw new LotteryError('INVALID_STOCK', 'Tổng nhập phải bằng tồn kho + đã phát; tồn kho không được thấp hơn giữ chỗ.', 409);
+      }
+      const tier = (prize_tier && prize_tier.trim()) ? prize_tier.trim() : (current.prize_tier || 'GIẢI THƯỞNG');
 
-    db.prepare(`
-      UPDATE prizes 
-      SET code = ?, prize_tier = ?, name = ?, image_url = ?, total_quantity = ?, remaining_quantity = ?, used_quantity = ?
-      WHERE id = ?
-    `).run(code ? code.trim().toUpperCase() : current.code, tier, name ? name.trim() : current.name, finalImageUrl, totalQty, remainQty, usedQty, id);
-
+      db.prepare(`
+        UPDATE prizes
+        SET code = ?, prize_tier = ?, name = ?, image_url = ?, total_quantity = ?, remaining_quantity = ?, used_quantity = ?
+        WHERE id = ?
+      `).run(code ? code.trim().toUpperCase() : current.code, tier, name ? name.trim() : current.name, finalImageUrl, totalQty, remainQty, usedQty, id);
+    }).immediate();
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -513,7 +464,7 @@ app.delete('/api/admin/prizes/:id', verifyAdmin, (req, res) => {
     db.prepare('DELETE FROM prizes WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -567,7 +518,7 @@ app.delete('/api/admin/lucky-codes/:id', verifyAdmin, (req, res) => {
     db.prepare('DELETE FROM lucky_codes WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -635,21 +586,25 @@ app.post('/api/admin/lucky-codes/import', verifyAdmin, uploadMemory.single('file
 // --- QUẢN TRỊ LƯỢT QUAY & ĐỒNG BỘ GOOGLE SHEETS ---
 app.get('/api/admin/spins', verifyAdmin, (req, res) => {
   try {
-    const { q, synced } = req.query;
+    const { q, synced, status } = req.query;
     let sql = 'SELECT * FROM spin_logs WHERE 1=1';
     const params = [];
     if (q && q.trim()) {
-      sql += ' AND (phone LIKE ? OR entry_code LIKE ? OR serial_number LIKE ? OR agency_name LIKE ? OR owner_name LIKE ?)';
+      sql += ' AND (phone LIKE ? OR entry_code LIKE ? OR serial_number LIKE ? OR agency_name LIKE ? OR bank_name LIKE ? OR bank_account_number LIKE ? OR bank_account_holder_name LIKE ?)';
       const term = `%${q.trim()}%`;
-      params.push(term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term);
     }
     if (synced !== undefined && synced !== 'all') {
       sql += ' AND is_synced = ?';
       params.push(parseInt(synced, 10));
     }
+    if (status === 'active' || status === 'void') {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
     sql += ' ORDER BY id DESC LIMIT 500';
     const spins = db.prepare(sql).all(...params);
-    res.json({ success: true, spins });
+    res.json({ success: true, spins: spins.map(spin => ({ ...spin, ...undoEligibility(db, spin) })) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -657,52 +612,10 @@ app.get('/api/admin/spins', verifyAdmin, (req, res) => {
 
 // XÓA LƯỢT QUAY ĐỂ QUAY LẠI (HOÀN MÃ VÀ HOÀN KHO QUÀ)
 app.delete('/api/admin/spins/:id', verifyAdmin, (req, res) => {
-  const { id } = req.params;
-
   try {
-    const deleteTransaction = db.transaction(() => {
-      // 1. Tìm thông tin lượt quay
-      const spin = db.prepare('SELECT * FROM spin_logs WHERE id = ?').get(id);
-      if (!spin) {
-        return { notFound: true };
-      }
-
-      // 2. Hoàn lại 1 quà vào kho quà tương ứng
-      if (spin.prize_id) {
-        db.prepare(`
-          UPDATE prizes 
-          SET remaining_quantity = remaining_quantity + 1,
-              used_quantity = MAX(0, used_quantity - 1)
-          WHERE id = ?
-        `).run(spin.prize_id);
-      }
-
-      // 3. Khôi phục mã dự thưởng về trạng thái 'unused'
-      if (spin.entry_code) {
-        db.prepare(`
-          UPDATE lucky_codes 
-          SET status = 'unused', used_at = NULL, spin_log_id = NULL 
-          WHERE UPPER(code) = ?
-        `).run(spin.entry_code.toUpperCase());
-      }
-
-      // 4. Xóa bản ghi lượt quay
-      db.prepare('DELETE FROM spin_logs WHERE id = ?').run(id);
-
-      return { success: true };
-    });
-
-    const result = deleteTransaction();
-    if (result.notFound) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy lượt quay!' });
-    }
-
-    res.json({ 
-      success: true, 
-      message: 'Đã xóa lượt quay thành công! Mã dự thưởng đã được giải phóng để quay lại, số lượng quà đã được cộng hoàn lại vào kho.' 
-    });
+    res.json(lottery.undo(req.params.id, 'admin'));
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    respondLotteryError(res, err);
   }
 });
 
@@ -723,12 +636,26 @@ app.get('/api/admin/export-spins', verifyAdmin, (req, res) => {
     const exportData = spins.map((s, idx) => ({
       'STT': idx + 1,
       'Thời gian': s.spin_time,
+      'Lượt tuyệt đối': s.spin_number || '',
+      'Vòng': s.cycle_number || '',
+      'Vị trí trong vòng': s.position_in_cycle || '',
+      'Trạng thái': s.status === 'void' ? 'Đã hủy' : 'Có hiệu lực',
+      'Thời điểm hủy': s.voided_at || '',
+      'Người hủy': s.voided_by || '',
+      'Phiên bản bản ghi': s.record_version,
+      'a trước lượt': s.decision_a ?? '',
+      'b trước lượt': s.decision_b ?? '',
+      'Phiên bản luật': s.rule_version || '',
+      'Mã quà': s.prize_code || '',
+      'Lý do nhận giải': s.decision_reason || '',
       'Mã đại lý': s.agency_code || '',
       'Tên đại lý': s.agency_name,
       'Tỉnh/thành': s.province,
-      'Chủ đại lý': s.owner_name,
       'Số điện thoại': s.phone,
       'Địa chỉ': s.address,
+      'Tên ngân hàng': s.bank_name || '',
+      'Số tài khoản ngân hàng': s.bank_account_number || '',
+      'Tên chủ tài khoản ngân hàng': s.bank_account_holder_name || '',
       'Mã dự thưởng': s.entry_code,
       'Mã serial': s.serial_number || '',
       'Tên giải': s.prize_tier || '',
@@ -784,7 +711,7 @@ app.post('/api/admin/settings', verifyAdmin, (req, res) => {
 });
 
 // Khởi động server
-app.listen(PORT, () => {
+if (require.main === module) app.listen(PORT, HOST, () => {
   console.log(`Server BioAmicus đang chạy tại http://localhost:${PORT}`);
   console.log(`Trang quay thưởng: http://localhost:${PORT}`);
   console.log(`Trang Admin: http://localhost:${PORT}/admin`);
@@ -792,3 +719,5 @@ app.listen(PORT, () => {
   // Khởi động background worker 2 phút/lần đồng bộ Google Sheet
   startSyncWorker();
 });
+
+module.exports = app;

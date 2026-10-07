@@ -1,3 +1,20 @@
+const APP_BASE_PATH = /^\/quaythuongdha-admin(?:\/|$)/.test(window.location.pathname) ? '/quaythuongdha-admin' : '';
+
+function apiFetch(endpoint, options) {
+  return window.fetch(APP_BASE_PATH + endpoint, options);
+}
+
+function assetUrl(url, fallback = '') {
+  const value = url || fallback;
+  return /^\/?(?:img|uploads)\//.test(value) ? `${APP_BASE_PATH}/${value.replace(/^\//, '')}` : value;
+}
+
+function formatSpinTime(value) {
+  if (typeof value !== 'string' || !value.trim()) return '—';
+  const parts = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?$/);
+  return parts ? `${parts[3]}/${parts[2]}/${parts[1]} · ${parts[4]}${parts[5] ? ` ${parts[5]}` : ''}` : value;
+}
+
 // Global State
 let token = localStorage.getItem('admin_token') || '';
 let currentTab = 'agencies';
@@ -12,6 +29,10 @@ function getAuthHeaders() {
 
 // 1. Khởi động ứng dụng Admin
 document.addEventListener('DOMContentLoaded', () => {
+  const userAppLink = document.querySelector('[data-user-app-link]');
+  if (userAppLink) {
+    userAppLink.href = APP_BASE_PATH ? '/quaythuongdha/' : '/';
+  }
   if (token) {
     showAdminApp();
   } else {
@@ -48,7 +69,7 @@ async function handleLogin(e) {
   errorMsg.style.display = 'none';
 
   try {
-    const res = await fetch('/api/admin/login', {
+    const res = await apiFetch('/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pass })
@@ -123,17 +144,35 @@ function switchTab(tabName) {
 
 // 4. Thống Kê Tổng Quan (Stats)
 async function loadDashboardStats() {
+  const overview = document.querySelector('.reward-overview');
+  const summaryStatus = document.getElementById('reward-summary-status');
+  overview.setAttribute('aria-busy', 'true');
+  summaryStatus.classList.remove('is-error');
+  summaryStatus.textContent = 'Đang tải thống kê…';
   try {
-    const res = await fetch('/api/admin/stats', { headers: getAuthHeaders() });
+    const res = await apiFetch('/api/admin/stats', { headers: getAuthHeaders() });
     const data = await res.json();
+    if (!res.ok || !data.success || !data.stats) throw new Error('Không tải được thống kê');
     if (data.success && data.stats) {
       document.getElementById('stat-agencies').textContent = data.stats.agencyCount;
       document.getElementById('stat-prizes').textContent = data.stats.prizeStock;
       document.getElementById('stat-spins').textContent = data.stats.totalSpins;
       document.getElementById('stat-unsynced').textContent = data.stats.unsyncedSpins;
+      const formatCount = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('vi-VN') : '—';
+      document.getElementById('stat-participants').textContent = formatCount(data.stats.participantCount);
+      for (const milestoneNumber of [14, 25]) {
+        const milestone = data.stats.milestones?.find(item => item.milestone === milestoneNumber);
+        document.getElementById(`stat-milestone-${milestoneNumber}-eligible`).textContent = formatCount(milestone?.eligible_count);
+        document.getElementById(`stat-milestone-${milestoneNumber}-gold`).textContent = formatCount(milestone?.gold_count);
+      }
+      summaryStatus.textContent = 'Chỉ tính lượt có hiệu lực · Không bao gồm lượt đã hủy';
     }
   } catch (err) {
+    summaryStatus.textContent = 'Chưa cập nhật được thống kê. Vui lòng tải lại trang để thử lại.';
+    summaryStatus.classList.add('is-error');
     console.error('Lỗi tải stats:', err);
+  } finally {
+    overview.setAttribute('aria-busy', 'false');
   }
 }
 
@@ -142,7 +181,7 @@ async function loadDashboardStats() {
 ======================================================== */
 async function loadProvincesFilter() {
   try {
-    const res = await fetch('/api/provinces');
+    const res = await apiFetch('/api/provinces');
     const data = await res.json();
     if (data.success && data.provinces) {
       allProvinces = data.provinces;
@@ -166,7 +205,7 @@ async function loadAgencies() {
 
   try {
     const url = `/api/admin/agencies?q=${encodeURIComponent(q)}&province=${encodeURIComponent(province)}`;
-    const res = await fetch(url, { headers: getAuthHeaders() });
+    const res = await apiFetch(url, { headers: getAuthHeaders() });
     const data = await res.json();
 
     if (!data.success || !data.agencies || data.agencies.length === 0) {
@@ -232,7 +271,7 @@ async function handleSaveAgency(e) {
   const method = isEdit ? 'PUT' : 'POST';
 
   try {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, name, province, address })
@@ -254,7 +293,7 @@ async function handleSaveAgency(e) {
 async function deleteAgency(id, name) {
   if (confirm(`Bạn có chắc chắn muốn xóa đại lý "${name}"?`)) {
     try {
-      const res = await fetch(`/api/admin/agencies/${id}`, {
+      const res = await apiFetch(`/api/admin/agencies/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -280,7 +319,7 @@ async function handleImportAgencyExcel(e) {
   formData.append('file', file);
 
   try {
-    const res = await fetch('/api/admin/agencies/import', {
+    const res = await apiFetch('/api/admin/agencies/import', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: formData
@@ -321,7 +360,7 @@ async function loadPrizes() {
   tbody.innerHTML = '<tr><td colspan="9" class="text-center">Đang tải danh sách quà...</td></tr>';
 
   try {
-    const res = await fetch('/api/admin/prizes', { headers: getAuthHeaders() });
+    const res = await apiFetch('/api/admin/prizes', { headers: getAuthHeaders() });
     const data = await res.json();
 
     if (!data.success || !data.prizes || data.prizes.length === 0) {
@@ -332,12 +371,11 @@ async function loadPrizes() {
     tbody.innerHTML = '';
     data.prizes.forEach((p, idx) => {
       const tr = document.createElement('tr');
-      const rateNum = parseFloat(p.win_rate) || 0;
 
       tr.innerHTML = `
         <td style="text-align: center;">${idx + 1}</td>
         <td>
-          <img src="${p.image_url || '/img/Artboard 23@2x.png'}" alt="quà" class="table-img">
+          <img src="${assetUrl(p.image_url, '/img/Artboard 23@2x.png')}" alt="quà" class="table-img">
         </td>
         <td><strong>${p.code}</strong></td>
         <td><strong style="color: #f7961d; text-transform: uppercase;">${p.prize_tier || 'GIẢI THƯỞNG'}</strong></td>
@@ -345,27 +383,21 @@ async function loadPrizes() {
         <td style="text-align: center;">${p.total_quantity}</td>
         <td style="text-align: center;"><strong style="color: ${p.remaining_quantity > 0 ? '#10b981' : '#ef4444'}; font-size: 1.05rem;">${p.remaining_quantity}</strong></td>
         <td style="text-align: center;">${p.used_quantity}</td>
-        <td>
-          <div class="rate-bar-container">
-            <div class="rate-bar">
-              <div class="rate-bar-fill" style="width: ${rateNum}%;"></div>
-            </div>
-            <strong>${p.win_rate}</strong>
-          </div>
-        </td>
         <td style="text-align: center;">
           <button class="btn btn-secondary btn-sm" onclick='editPrize(${JSON.stringify(p)})'>Sửa</button>
-          <button class="btn btn-danger-outline btn-sm" onclick="deletePrize(${p.id}, '${p.name}')">Xóa</button>
+          ${p.rule_locked ? '<span class="badge badge-info">Khóa mã quà</span>' : `<button class="btn btn-danger-outline btn-sm" onclick="deletePrize(${p.id}, '${p.name}')">Xóa</button>`}
         </td>
       `;
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="10" class="text-center error-msg">Lỗi tải danh sách quà.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center error-msg">Lỗi tải danh sách quà.</td></tr>';
   }
 }
 
 function openPrizeModal() {
+  document.getElementById('prize-form-code').readOnly = false;
+  document.getElementById('prize-form-remain').min = '0';
   document.getElementById('prize-modal-title').textContent = 'Thêm Quà Tặng Mới';
   document.getElementById('prize-edit-id').value = '';
   document.getElementById('prize-form-code').value = '';
@@ -379,6 +411,8 @@ function openPrizeModal() {
 }
 
 function editPrize(p) {
+  document.getElementById('prize-form-code').readOnly = Boolean(p.rule_locked);
+  document.getElementById('prize-form-remain').min = String(p.reserved_quantity || 0);
   document.getElementById('prize-modal-title').textContent = 'Chỉnh Sửa Quà Tặng';
   document.getElementById('prize-edit-id').value = p.id;
   document.getElementById('prize-form-code').value = p.code;
@@ -422,7 +456,7 @@ async function handleSavePrize(e) {
   const method = isEdit ? 'PUT' : 'POST';
 
   try {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method,
       headers: getAuthHeaders(),
       body: formData
@@ -443,7 +477,7 @@ async function handleSavePrize(e) {
 async function deletePrize(id, name) {
   if (confirm(`Bạn có chắc chắn muốn xóa phần quà "${name}"?`)) {
     try {
-      const res = await fetch(`/api/admin/prizes/${id}`, {
+      const res = await apiFetch(`/api/admin/prizes/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -473,7 +507,7 @@ async function loadCodes() {
 
   try {
     const url = `/api/admin/lucky-codes?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`;
-    const res = await fetch(url, { headers: getAuthHeaders() });
+    const res = await apiFetch(url, { headers: getAuthHeaders() });
     const data = await res.json();
 
     if (!data.success || !data.codes || data.codes.length === 0) {
@@ -522,7 +556,7 @@ async function handleSaveCode(e) {
   const serial_number = document.getElementById('code-form-serial').value.trim();
 
   try {
-    const res = await fetch('/api/admin/lucky-codes', {
+    const res = await apiFetch('/api/admin/lucky-codes', {
       method: 'POST',
       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, serial_number })
@@ -543,7 +577,7 @@ async function handleSaveCode(e) {
 async function deleteCode(id, code) {
   if (confirm(`Bạn có chắc muốn xóa mã "${code}"?`)) {
     try {
-      const res = await fetch(`/api/admin/lucky-codes/${id}`, {
+      const res = await apiFetch(`/api/admin/lucky-codes/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -568,7 +602,7 @@ async function handleImportCodeExcel(e) {
   formData.append('file', file);
 
   try {
-    const res = await fetch('/api/admin/lucky-codes/import', {
+    const res = await apiFetch('/api/admin/lucky-codes/import', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: formData
@@ -608,12 +642,13 @@ async function loadSpins() {
   const tbody = document.getElementById('spins-table-body');
   const q = document.getElementById('spin-search-input').value.trim();
   const synced = document.getElementById('spin-sync-filter').value;
+  const status = document.getElementById('spin-status-filter').value;
 
   tbody.innerHTML = '<tr><td colspan="10" class="text-center">Đang tải lịch sử quay...</td></tr>';
 
   try {
-    const url = `/api/admin/spins?q=${encodeURIComponent(q)}&synced=${encodeURIComponent(synced)}`;
-    const res = await fetch(url, { headers: getAuthHeaders() });
+    const url = `/api/admin/spins?q=${encodeURIComponent(q)}&synced=${encodeURIComponent(synced)}&status=${encodeURIComponent(status)}`;
+    const res = await apiFetch(url, { headers: getAuthHeaders() });
     const data = await res.json();
 
     if (!data.success || !data.spins || data.spins.length === 0) {
@@ -627,13 +662,21 @@ async function loadSpins() {
       const isSynced = s.is_synced === 1;
 
       tr.innerHTML = `
-        <td style="font-size: 0.85rem; color: #475569;">${s.spin_time}</td>
+        <td>
+          <div class="spin-summary">
+            <strong class="spin-summary-title">Lượt quay thứ ${s.spin_number}</strong>
+            <span class="spin-summary-time">${formatSpinTime(s.spin_time)}</span>
+            <span class="badge ${s.status === 'void' ? 'badge-danger' : 'badge-success'}">${s.status === 'void' ? 'Đã hủy' : 'Đã ghi nhận'}</span>
+            ${s.status === 'void' ? `<span class="spin-summary-voided">Thời điểm hủy: ${formatSpinTime(s.voided_at)}</span>` : ''}
+          </div>
+        </td>
         <td><strong>${s.agency_code || '-'}</strong></td>
         <td><strong>${s.agency_name}</strong></td>
         <td>${s.province}</td>
         <td>
-          <div>${s.owner_name}</div>
           <strong style="color: #0284c7;">${s.phone}</strong>
+          <div class="spin-bank"></div>
+          <div class="spin-account-holder"></div>
         </td>
         <td style="font-size: 0.85rem;">${s.address}</td>
         <td>
@@ -642,7 +685,7 @@ async function loadSpins() {
         </td>
         <td>
           <div style="display: flex; align-items: center; gap: 8px;">
-            <img src="${s.prize_image || '/img/Artboard 23@2x.png'}" alt="quà" style="width: 28px; height: 28px; border-radius: 4px; object-fit: contain;">
+            <img src="${assetUrl(s.prize_image, '/img/Artboard 23@2x.png')}" alt="quà" style="width: 28px; height: 28px; border-radius: 4px; object-fit: contain;">
             <strong style="color: #d97706;">${s.prize_name}</strong>
           </div>
         </td>
@@ -652,11 +695,11 @@ async function loadSpins() {
           </span>
         </td>
         <td style="text-align: center;">
-          <button class="btn btn-danger-outline btn-sm" onclick="deleteSpin(${s.id}, '${s.entry_code}', '${s.prize_name}')" title="Xóa lượt quay, hoàn lại mã và kho quà">
-            🗑️ Xóa & Hoàn Mã
-          </button>
+          ${s.canUndo ? `<button class="btn btn-danger-outline btn-sm" onclick="deleteSpin(${s.id})">Hủy lượt cuối</button>` : `<span class="badge badge-info">${s.undoReason === 'SPIN_ALREADY_VOID' ? 'Đã hủy' : s.undoReason === 'NOT_LATEST_SPIN' ? 'Không phải lượt cuối' : 'Không thể hủy'}</span>`}
         </td>
       `;
+      tr.querySelector('.spin-bank').textContent = `${s.bank_name || '-'} · ${s.bank_account_number || '-'}`;
+      tr.querySelector('.spin-account-holder').textContent = s.bank_account_holder_name || '-';
       tbody.appendChild(tr);
     });
   } catch (err) {
@@ -665,12 +708,12 @@ async function loadSpins() {
 }
 
 // XÓA LƯỢT QUAY & HOÀN LẠI MÃ, HOÀN KHO QUÀ
-async function deleteSpin(id, code, prizeName) {
-  const confirmText = `BẠN CÓ CHẮC CHẮN MUỐN XÓA LƯỢT QUAY NÀY?\n\n- Mã dự thưởng "${code}" sẽ được giải phóng về trạng thái CHƯA SỬ DỤNG (đại lý có thể quay lại).\n- Kho quà tặng "${prizeName}" sẽ được CỘNG LẠI 1 SẢN PHẨM.\n\nNhấn OK để thực hiện.`;
+async function deleteSpin(id) {
+  const confirmText = 'Hủy lượt cuối của SĐT này?\n\nQuà và mã sẽ được hoàn lại, bộ đếm giảm một. Bản ghi vẫn được giữ để đối soát. Quay lại sẽ xét theo dữ liệu hiện tại và có thể nhận kết quả khác.\n\nChỉ xác nhận sau khi đã thu hồi/đối soát quà thực tế đã phát.';
 
   if (confirm(confirmText)) {
     try {
-      const res = await fetch(`/api/admin/spins/${id}`, {
+      const res = await apiFetch(`/api/admin/spins/${id}`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -698,7 +741,7 @@ async function triggerManualSync() {
   btn.innerHTML = '⏳ ĐANG ĐỒNG BỘ...';
 
   try {
-    const res = await fetch('/api/admin/sync-sheet', {
+    const res = await apiFetch('/api/admin/sync-sheet', {
       method: 'POST',
       headers: getAuthHeaders()
     });
@@ -720,8 +763,24 @@ async function triggerManualSync() {
 }
 
 // XUẤT BÁO CÁO EXCEL LỊCH SỬ QUAY
-function exportSpinsExcel() {
-  window.open('/api/admin/export-spins?token=' + encodeURIComponent(token), '_blank');
+async function exportSpinsExcel() {
+  try {
+    const response = await apiFetch('/api/admin/export-spins', { headers: getAuthHeaders() });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || 'Không thể xuất lịch sử quay thưởng.');
+    }
+    const downloadUrl = URL.createObjectURL(await response.blob());
+    const downloadLink = document.createElement('a');
+    downloadLink.href = downloadUrl;
+    downloadLink.download = 'Lich_su_quay_thuong_BioAmicus.xlsx';
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    downloadLink.remove();
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+  } catch (error) {
+    alert(error.message || 'Lỗi kết nối máy chủ!');
+  }
 }
 
 
@@ -730,7 +789,7 @@ function exportSpinsExcel() {
 ======================================================== */
 async function loadSettings() {
   try {
-    const res = await fetch('/api/admin/settings', { headers: getAuthHeaders() });
+    const res = await apiFetch('/api/admin/settings', { headers: getAuthHeaders() });
     const data = await res.json();
     if (data.success) {
       document.getElementById('setting-webhook-url').value = data.google_sheet_webhook_url || '';
@@ -744,7 +803,7 @@ async function saveWebhookSetting() {
   const url = document.getElementById('setting-webhook-url').value.trim();
 
   try {
-    const res = await fetch('/api/admin/settings', {
+    const res = await apiFetch('/api/admin/settings', {
       method: 'POST',
       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ google_sheet_webhook_url: url })
@@ -768,7 +827,7 @@ async function changeAdminPassword() {
   }
 
   try {
-    const res = await fetch('/api/admin/settings', {
+    const res = await apiFetch('/api/admin/settings', {
       method: 'POST',
       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ new_password: newPass })
